@@ -1,0 +1,912 @@
+#!/bin/bash
+# vim:et:sta:sts=4:sw=4:ts=8:tw=79:
+
+clxbuildver=1.0
+startdir="$(pwd)"
+
+err()
+{
+    echo "ERROR: $1"
+    exit 1
+}
+
+help_msg()
+{
+cat <<EOHELP
+
+Usage: clxbuild [OPTIONS] [prototype]
+
+OPTIONS:
+
+  no option                   creates build-\$pkgname.sh
+
+  -g, --generate [prototype]  copy a CLXBUILD prototype
+
+  -c, --clean-dirs            creates a build-\$pkgname.sh that will remove pkg and src directories
+  
+  -x, --execute               creates build-\$pkgname.sh, then executes it
+
+  -X, --x-and-clean           combines -x and -c together
+    
+  -v, --version               outputs the version
+  
+  -h, --help                  display this message
+
+Report bugs or suggestions to <vlahavas~at~gmail~dot~com>.
+
+EOHELP
+exit 1
+}
+
+generate_clxbuild() {
+    EXTENSION="$1"
+    ACTUALFILE=CLXBUILD
+    [ -n "$EXTENSION" ] && ACTUALFILE+=".$EXTENSION"
+    TEMPLATE="@sysconfdir@/clxbuild/$ACTUALFILE"
+    if [ ! -f "$TEMPLATE" ]; then
+        err "No $TEMPLATE found in @sysconfdir@, exiting."
+    elif [ -f "$startdir/CLXBUILD" ]; then
+        echo "There is already a CLXBUILD in the current directory."
+        echo -n "Generate CLXBUILD and overwrite it anyways? [y/n] "
+        while :; do #infinitely
+            read answer
+            case $answer in
+                ''|'y'|'Y'|'yes'|'YES')
+                    rm $startdir/CLXBUILD
+                    cp $TEMPLATE $startdir/CLXBUILD
+                    echo "CLXBUILD created."
+                    exit
+                    ;;
+                'n'|'N'|'no'|'NO')
+                    echo "Not creating CLXBUILD, exiting."
+                    exit
+                    ;;
+                *)
+                    echo -n "Incorrect response, reply y or n: "
+            esac
+        done
+    else
+        cp $TEMPLATE $startdir/CLXBUILD
+        exit
+    fi
+}
+
+#Set Options
+unset EXECUTE
+unset GENERATE
+unset REMOVEDIRS
+unset ARG1 ARG2
+
+#If PKGEXT or PKGTYPE is set, use that as the package format. PKGEXT has
+#priority over PKGTYPE. Otherwise set the default package format to .txz
+PKGEXT=${PKGEXT:-${PKGTYPE:-"txz"}}
+
+#Set to use the default makepkg in Slackware. Since brotli is still not
+#available in the Slackware pkgtools, if tbr package is requested,
+#default to the internal makepkg
+if [[ $PKGEXT = "tbr" ]]; then
+    echo "Using internal makepkg implementation"
+    MAKEPKG=makepkg_internal
+elif [[ -z $MAKEPKG ]]; then
+    if [ -x /sbin/makepkg ]; then
+        MAKEPKG="/sbin/makepkg"
+    else
+        echo "Using internal makepkg implementation"
+        MAKEPKG=makepkg_internal
+    fi
+elif [[ $MAKEPKG = "makepkg_internal" ]]; then
+    echo "Using internal makepkg implementation"
+else
+    echo "Using makepkg alternative command: $MAKEPKG"
+fi
+
+#Use link prepending by default
+LINKPREPEND="-p"
+
+SHORTOPTS="hXxg::cv"
+LONGOPTS="help,version,x-and-clean,execute,generate::,clean-dirs"
+# Note that we use `"$@"' to let each command-line parameter expand to a
+# separate word. The quotes around `$@' are essential!
+# We need TEMP as the `eval set --' would nuke the return value of getopt.
+#TEMP=`getopt -o $SHORTOPTS --long $LONGOPTS -n build --"$@"`
+TEMP=$(getopt -o $SHORTOPTS --long $LONGOPTS -n "$progname" -- "$@")
+
+[ -n $1 ] && ARG1=$1
+[ -n $2 ] && ARG2=$2
+
+# Note the quotes around `$TEMP': they are essential!
+eval set -- "$TEMP"
+while [ $# -gt 0 ]; do
+    case $ARG1 in
+        '-h'|'--help')
+            help_msg
+            exit
+            ;;
+        '-X'|'--x-and-clean')
+            EXECUTE='1'
+            REMOVEDIRS='1'
+            ;;
+        '-x'|'--execute')
+            EXECUTE='1'
+            ;;
+        '-g'|'--generate')
+            GENERATE='1'
+            generate_clxbuild "$ARG2"
+            exit
+            ;;
+        '-c'|'--clean-dirs')
+            REMOVEDIRS='1'
+            ;;
+        '-v'|'--version')
+            echo "clxbuild version: $clxbuildver"
+            exit
+            ;;
+        '')
+            ;;
+                --)
+                        break
+                        ;;
+        *)
+            err "Incorrect usage, see clxbuild --help"
+    esac
+    shift
+done
+
+#If arch is not set, determine it automatically
+if [ -z "$arch" ]; then
+    case "$( uname -m )" in
+        i?86) export arch=i586 ;;
+        arm*) readelf /usr/bin/file -A | egrep -q "Tag_CPU.*[4,5]" && \
+            arch=arm || arch=armv7hl ;;
+        *) export arch=$( uname -m ) ;;
+    esac
+    echo "Automatically setting arch to $arch"
+fi
+
+#Source the CLXBUILD script
+if [ -f "${startdir}/CLXBUILD" ]; then
+    unset pkgname pkgver pkgrel source extradepends options \
+          dotnew url CFLAGS CXXFLAGS SLKCFLAGS LIBDIRSUFFIX \
+          slackdesc doinst build docs sourcetemplate
+    . ${startdir}/CLXBUILD
+else
+    err "No CLXBUILD found in directory, see clxbuild --help"
+fi
+
+##################Sanity Tests Begin######################################
+#Check that variables exist
+for VAR in pkgname pkgver pkgrel slackdesc; do
+    [[ ! "${!VAR}" ]] &&
+        err "variable \"${VAR}\" is not set"
+done
+
+#special source check
+if [[ ! "$source" ]]; then
+    echo "source should be filled except in rare occassions (cvs,svn,etc.)"
+fi
+
+#check for source template
+
+#does build() exist?
+[[ ! "$(grep '^build\(\)' ${startdir}/CLXBUILD)" ]] &&
+    err "No build() function found"
+
+#check that variables are sane
+[[ "$(echo $pkgver | grep -E '\-')" ]] &&
+        err "No dashes allowed in pkgver"
+
+[[ "${slackdesc[10]}" ]] &&
+    err "No more than 10 lines allowed in slackdesc"
+
+if [ "$(grep -e "^#Maintainer: Name <email@address.com>\|^#Packager: Name <email@address.com>" $startdir/CLXBUILD)" ]; then
+      err "Packager or Maintainer isn't set in CLXBUILD, exiting"
+elif [ ! "$(grep -e "^#Maintainer:\|\|^# Maintainer:\|^#Packager:\|^# Packager:" $startdir/CLXBUILD)" ]; then
+      err "Please specify #Packager: or #Maintainer: in first line of your CLXBUILD. Exiting."
+fi
+
+#Check for numerous commentaries
+NUMCOM=$(grep -e "^#[a-zA-Z]*=[a-zA-Z]*" ${startdir}/CLXBUILD | wc -l)
+[[ $NUMCOM -ge 2 ]] && echo "WARNING: You appear to have too many commented variables, you should look into it."
+
+#source sanity
+for SOURCES in "${source[@]}"; do
+    file=$(basename $SOURCES | awk -F= '{print $NF}')
+    if [ ! -f "$file" ]; then
+        protocol=$(echo $SOURCES | sed 's|:.*||')
+        if [ "$protocol" = "http" -o "$protocol" = "https" -o "$protocol" = "ftp" ]; then
+            echo -e "\nDownloading $file\n"
+            wget -c --no-check-certificate $(echo "$SOURCES" | awk -F= '{print $1}') -O $file
+            if [ ! "$?" == "0" ]; then
+                echo "Download failed"
+                rm -f $file
+                exit 2
+            fi 
+        else
+            err "$SOURCES does not appear to be a url nor is it in the directory"
+        fi
+    else
+        echo "$file found in current directory"
+    fi
+done
+
+#slackdesc sanity
+for ((LINE=0 ; LINE < 10 ; LINE++)); do
+    REALLINE=$(expr $LINE + 1)
+    if [ "${#slackdesc[$LINE]}" -gt "70" ] ; then
+        let "extrachar=${#slackdesc[$LINE]}-70"
+        err "Line ${REALLINE}: '${slackdesc[$LINE]}' is greater than 70 characters, make it $extrachar characters shorter."
+    fi
+done
+
+#clean dotnew
+if [[ "$dotnew" ]]; then
+    NUM='0'
+    for dot in ${dotnew[@]}; do
+        if [ "${dotnew[$NUM]:0:1}" == "/" ]; then
+            dotnew[$NUM]=${dotnew[$NUM]:1}
+        fi
+        let "NUM++"
+    done
+fi
+
+#########Sanity Tests End########################################
+
+#options=()
+if [ -n "$options" ]; then
+    unset NOEXTRACT
+    unset NOSTRIP
+    unset NOAUTODOTNEW
+    for opts in ${options[@]}; do
+        case $opts in
+            keepla)
+                echo "Setting option keepla"
+                KEEPLA='1'
+                ;;
+            nosrcpack)
+                echo "Setting option nosrcpack"
+                NOSRCPACK='1'
+                ;;
+            noextract)
+                echo "Setting option noextract"
+                NOEXTRACT='1'
+                ;;
+            nostrip)
+                echo "Setting option nostrip"
+                NOSTRIP='1'
+                ;;
+            noautodotnew)
+                echo "Setting option noautodotnew"
+                NOAUTODOTNEW='1'
+                ;;
+            nolinkprepend)
+                echo "Setting option nolinkprepend"
+                LINKPREPEND=''
+                ;;
+            txz)
+                echo "Setting package type: txz"
+                PKGEXT="txz"
+                ;;
+            tgz)
+                echo "Setting package type: tgz"
+                PKGEXT="tgz"
+                ;;
+            tlz)
+                echo "Setting package type: tlz"
+                PKGEXT="tlz"
+                ;;
+            tbz)
+                echo "Setting package type: tbz"
+                PKGEXT="tbz"
+                ;;
+            tbr)
+                echo "Setting package type: tbr"
+                PKGEXT="tbr"
+                echo "Switching to the internal makepkg implementation"
+                MAKEPKG=makepkg_internal
+                ;;
+            *)
+                echo "$opts is not a correct option, exiting."
+                exit 2
+                ;;
+        esac
+    done
+fi
+
+#######Generate Build Script#####################################
+cat <<EOA > ${startdir}/build-${pkgname}.sh
+#!/bin/bash
+#Automatically Created by clxbuild $clxbuildver
+EOA
+if [ "$(grep -e "^#Maintainer\|^#Packager" $startdir/CLXBUILD)" ]; then
+    grep -e "^#Maintainer\|^#Packager" $startdir/CLXBUILD >> $startdir/build-$pkgname.sh
+fi
+[[ "$(grep -e "^#Former Maintainer(s)\|^#Former Packager(s)" $startdir/CLXBUILD)" ]] &&
+    grep -e "^#Former Maintainer(s)\|^#Former Packager(s)" $startdir/CLXBUILD >> $startdir/build-$pkgname.sh
+[[ "$url" ]] && echo "#url: $url" >> $startdir/build-$pkgname.sh
+
+##########Variables START
+cat <<EOVARIABLES >>$startdir/build-$pkgname.sh
+
+###Variables
+startdir=\$(pwd)
+SRC=\$startdir/src
+PKG=\$startdir/pkg
+
+pkgname=$pkgname
+pkgver=$pkgver
+pkgrel=$pkgrel
+arch=$arch
+numjobs=${numjobs:-1}
+package=\$pkgname-\$pkgver-\$arch-$pkgrel
+EOVARIABLES
+
+grep -e "^_[a-zA-Z]*=[a-zA-Z]*" $startdir/CLXBUILD >> $startdir/build-$pkgname.sh
+for (( I=0; I < ${#source[@]} ; I++)); do
+        source[$I]="\"${source[$I]}\""
+done
+echo "source=(${source[@]})" >> $startdir/build-$pkgname.sh
+if [[ ! -z $sourcetemplate ]]; then
+    if [ ${sourcetemplate: -1} == "/" ]; then
+        tmpsource=$(echo $sourcetemplate | rev);
+        echo "sourcetemplate=$(echo ${tmpsource:1} | rev)" >> $startdir/build-$pkgname.sh
+    else
+        echo "sourcetemplate=$sourcetemplate" >> $startdir/build-$pkgname.sh
+    fi
+fi
+echo "docs=(${docs[@]})" >> $startdir/build-$pkgname.sh
+
+if [ $arch == "x86_64" ]; then
+    CFLAGS=${CFLAGS:-"-O2 -fPIC"}
+    CXXFLAGS=${CFLAGS:-"-O2 -fPIC"}
+    SLKCFLAGS=${CFLAGS}
+    LIBDIRSUFFIX="64"
+elif [ $arch == "i486" ] || [ $arch == "i586" ]; then
+    CFLAGS=${CFLAGS:-"-O2 -march=$arch -mtune=i686"}
+    CXXFLAGS=${CFLAGS:-"-O2 -march=$arch -mtune=i686"}
+    SLKCFLAGS=${CFLAGS}
+    LIBDIRSUFFIX=""
+elif [ $arch == "armv7hl" ]; then
+    CFLAGS=${CFLAGS:-"-O2 -march=armv7-a -mfpu=vfpv3-d16"}
+    CXXFLAGS=${CFLAGS:-"-O2 -march=armv7-a -mfpu=vfpv3-d16"}
+    SLKCFLAGS=${CFLAGS}
+    LIBDIRSUFFIX=""
+else
+    CFLAGS=${CFLAGS:-"-O2 -march=$arch"}
+    CXXFLAGS=${CFLAGS:-"-O2 -march=$arch"}
+    SLKCFLAGS=${CFLAGS}
+    LIBDIRSUFFIX=""
+fi
+ARCH=$arch
+
+for FLAGS in CFLAGS CXXFLAGS SLKCFLAGS LIBDIRSUFFIX ARCH; do
+    echo "export $FLAGS=\"${!FLAGS}\"" >>$startdir/build-$pkgname.sh
+done
+
+##########Variables END
+
+
+cat <<"EOREDUNDANT" | \
+    sed "s|__MAKEPKG__|$MAKEPKG|g" | \
+    sed "s|__LINKPREPEND__|$LINKPREPEND|g" | \
+    sed "s|__PKGEXT__|$PKGEXT|g" \
+    >> $startdir/build-$pkgname.sh
+
+######Begin Redundant Code######################################
+check_for_root() {
+    if [ "$UID" != "0" ]; then
+        echo -e "\nERROR: You need to be root. Using fakeroot is usually preferable."
+        echo "Example command: fakeroot clxbuild -X"
+        exit 1
+    fi
+}
+
+clean_dirs () {
+        for COMPLETED in src pkg; do
+                if [ -e $COMPLETED ]; then
+                        rm -rf $COMPLETED
+                fi
+        done
+}
+
+clean_old_builds () {
+    rm -rf $package.{t[xlgb]z,tbr,md5}
+    clean_dirs
+}
+
+set_pre_permissions() {
+    cd $startdir/src
+    find -L . \( \
+        -perm 777 \
+        -o -perm 775 \
+        -o -perm 750 \
+        -o -perm 711 \
+        -o -perm 555 \
+        -o -perm 511 \) \
+        -print0 | \
+        xargs -0r chmod 755
+    find -L . \( \
+        -perm 666 \
+        -o -perm 664 \
+        -o -perm 640 \
+        -o -perm 600 \
+        -o -perm 444 \
+        -o -perm 440 \
+        -o -perm 400 \) \
+        -print0 | \
+        xargs -0r chmod 644
+}
+
+
+remove_libtool_archives() {
+    [ -d $startdir/pkg/lib${LIBDIRSUFFIX} ] && \
+        find $startdir/pkg/lib${LIBDIRSUFFIX} -name "*.la" -delete
+    [ -d $startdir/pkg/usr/lib${LIBDIRSUFFIX} ] && \
+        find $startdir/pkg/usr/lib${LIBDIRSUFFIX} -name "*.la" -delete
+}
+
+gzip_man_and_info_pages() {
+    for DOCS in man info; do
+        if [ -d "$startdir/pkg/usr/share/$DOCS" ]; then
+            mv $startdir/pkg/usr/share/$DOCS $startdir/pkg/usr/$DOCS
+            if [[ ! "$(ls $startdir/pkg/usr/share)" ]]; then
+                rm -rf $startdir/pkg/usr/share
+            fi
+        fi
+        if [ -d "$startdir/pkg/usr/$DOCS" ]; then
+            # I've never seen symlinks in info pages....
+            if [ "$DOCS" == "man" ]; then
+                (cd $startdir/pkg/usr/$DOCS
+                for manpagedir in $(find . -type d -name "man*" 2> /dev/null) ; do
+                    ( cd $manpagedir
+                    for eachpage in $( find . -type l -maxdepth 1 2> /dev/null) ; do
+                        ln -s $( readlink $eachpage ).gz $eachpage.gz
+                        rm $eachpage
+                    done )
+                done)
+            fi
+            find $startdir/pkg/usr/$DOCS -type f -exec gzip -9 '{}' \;
+        fi
+    done
+    [ -a $startdir/pkg/usr/info/dir.gz ] && rm -f $startdir/pkg/usr/info/dir.gz
+}
+
+set_post_permissions() {
+    for DIRS in usr/share/icons usr/doc; do
+        if [ -d "$startdir/pkg/$DIRS" ]; then
+            if [ "$DIRS" == "usr/doc" ]; then
+                find -L $startdir/pkg/$DIRS -type f -print0 | \
+                    xargs -0r chmod 644
+                find -L $startdir/pkg/$DIRS -type d -print0 | \
+                    xargs -0r chmod 755
+            fi
+        fi
+        [ -d $startdir/pkg/$DIRS ] && chown root:root -R $startdir/pkg/$DIRS
+    done
+    [ -d $startdir/pkg/usr/bin ] && find $startdir/pkg/usr/bin -user root -group bin -exec chown root:root {} \;
+}
+
+copy_build_script() {
+    mkdir -p $startdir/pkg/usr/src/$pkgname-$pkgver/
+    [ -f $startdir/CLXBUILD ] && cp $startdir/CLXBUILD    $startdir/pkg/usr/src/$pkgname-$pkgver/CLXBUILD
+}
+
+create_package() {
+    ls -lR $startdir/pkg
+    cd $startdir/pkg
+    __MAKEPKG__ __LINKPREPEND__ -l y -c n $startdir/$package.__PKGEXT__
+    cd $startdir
+    md5sum $package.__PKGEXT__ > $startdir/$package.md5
+}
+
+EOREDUNDANT
+
+#If the internal makepkg implementation is used instead of an external
+#command, insert the relevant function in the buildscript. The
+#makepkg_internal() function is taken from the fmakepkg() function by
+#ruario: https://gist.github.com/ruario/9672717
+if [[ $MAKEPKG = "makepkg_internal" ]]; then
+cat <<"EOMAKEPKG" >> $startdir/build-$pkgname.sh
+makepkg_internal() {
+
+  # Handle Slackware's makepkg options
+  while [ 0 ]; do
+    if [ "$1" = "-p" -o "$1" = "--prepend" ]; then
+      # option ignored, links are always prepended
+      shift 1
+    elif [ "$1" = "--linkadd" -o "$1" = "-l" ]; then
+      if [ "$2" = "n" ]; then
+        echo "\"$1 $2\" ignored, links are always converted" >&2
+      fi
+      shift 2
+    elif [ "$1" = "--chown" -o "$1" = "-c" ]; then
+      # This option now also changes ownership of all files to root:root
+      SETPERMS="$2"
+      shift 2
+    else
+      break
+    fi
+  done
+
+  # Change any symlinks into shell script code
+  if find * -type l | grep -qm1 .; then
+    mkdir -p install
+    find * -type l -printf '( cd %h ; rm -rf %f )\n( cd %h ; ln -sf %l %f )\n' -delete > install/symlinks
+    if [ -f "install/doinst.sh" ]; then
+      printf '\n' | cat - install/doinst.sh >> install/symlinks
+    fi
+    mv install/symlinks install/doinst.sh
+  fi
+
+  # Reset permissions and ownership
+  if [ "${SETPERMS:-y}" = "y" ]; then
+    find . -type d -exec chmod 755 {} \;
+    # Changing file ownership is an unofficial extension to makepkg
+    TAROWNER="--group 0 --owner 0"
+  else
+    TAROWNER=""
+  fi
+
+  # Create package using tar 1.13 directory formatting
+  case "$1" in
+    *tbz) cmp="bzip2 -9c" ;;
+    *tgz) cmp="gzip -9c" ;;
+    *tlz) cmp="lzma -c";;
+    *txz) cmp="xz -c";;
+    *tbr) cmp="brotli -c --quality ${BROTLI_QUALITY:-1}" ;; # Experimental support for Brotli compression
+    *) echo "Unknown compression type" >&2 ; exit 1 ;;
+  esac
+  tar cvvf - . --format gnu --xform 'sx^\./\(.\)x\1x' --show-stored-names $TAROWNER | $cmp > "$1"
+  echo "Slackware package \"$1\" created."
+
+}
+
+EOMAKEPKG
+fi
+
+if [ -z "$NOSTRIP" ]; then
+cat <<"EOREDUNDANT1" >> $startdir/build-$pkgname.sh
+strip_binaries() {
+    cd $startdir/pkg
+    find . -print0 | \
+        xargs -0r file | \
+        grep -e "executable" -e "shared object" | \
+        grep ELF | \
+        cut -f 1 -d : | \
+        xargs strip --strip-unneeded 2> /dev/null || true
+}
+EOREDUNDANT1
+fi
+
+cat <<"EOREDUNDANT2" >> $startdir/build-$pkgname.sh
+#########End Redundant Code#####################################
+#########Begin Non Redundant Code##############################
+
+EOREDUNDANT2
+
+if [[ "$source" ]]; then
+cat <<EOPREPAREDIRECTORY >>$startdir/build-$pkgname.sh
+prepare_directory() {
+    NOSRCPACK="$NOSRCPACK"
+    mkdir \$startdir/src
+    mkdir -p \$startdir/pkg/usr/src/\$pkgname-\$pkgver
+    for SOURCES in \${source[@]}; do
+        protocol=\$(echo \$SOURCES | sed 's|:.*||')
+            file=\$(basename \$SOURCES | awk -F= '{print \$NF}')
+        if [ ! -f "\$file" ]; then
+            if [ "\$protocol" = "http" -o "\$protocol" = "https" -o "\$protocol" = "ftp" ]; then
+                echo -e "\nDownloading \$(basename \$SOURCES)\n"
+                            wget -c --no-check-certificate \$SOURCES -O \$file
+                if [ ! "\$?" == "0" ]; then
+                    echo "Download failed"
+                    exit 2
+                fi 
+            else
+                echo "\$SOURCES does not appear to be a url nor is it in the directory"
+                exit 2
+            fi
+        fi
+        cp -LR \$file \$startdir/src
+        if ! [ "\$protocol" = "http" -o "\$protocol" = "https" -o "\$protocol" = "ftp" ]; then
+            if ! [[ \$NOSRCPACK -eq 1 ]]; then
+                cp -LR \$startdir/\$(basename \$SOURCES) \$startdir/pkg/usr/src/\$pkgname-\$pkgver/
+            fi
+        fi
+    done
+}
+
+EOPREPAREDIRECTORY
+
+else
+cat <<"EOPREPAREDIRECTORY" >>$startdir/build-$pkgname.sh
+prepare_directory() {
+    mkdir $startdir/src
+    mkdir $startdir/pkg
+}
+
+EOPREPAREDIRECTORY
+fi
+
+if [ -z "$NOEXTRACT" ]; then
+cat <<EOEXTRACTSOURCES >>$startdir/build-$pkgname.sh
+extract_source() {
+    cd \$startdir/src
+    if [[ "\$(ls \$startdir/src)" ]]; then    
+        for FILES in \${source[@]}; do
+                FILES="\$(basename \$FILES | awk -F= '{print \$NF}')"
+            file_type=\$(file -biLz "\$FILES")
+            unset cmd
+            case "\$file_type" in
+                *application/x-tar*)
+                    cmd="tar -xf" ;;
+                *application/x-zip*)
+                    cmd="unzip" ;;
+                *application/zip*)
+                    cmd="unzip" ;;
+                *application/x-gzip*)
+                    cmd="gunzip -d -f" ;;
+                *application/x-bzip*)
+                    cmd="bunzip2 -f" ;;
+                *application/x-xz*)
+                    cmd="xz -d -f" ;;
+                *application/x-lzma*)
+                    cmd="lzma -d -f" ;;
+                *application/x-rar*)
+                    cmd="unrar x" ;;
+            esac
+            if [ "\$cmd" != "" ]; then
+                echo "\$cmd \$FILES"
+                        \$cmd \$FILES
+            fi
+        done
+    elif [ ! "\$source" ]; then
+        echo -n "" # lame fix
+    else
+        echo "no files in the src directory \$startdir/src"
+        exit 2
+    fi
+}
+
+EOEXTRACTSOURCES
+fi
+
+declare -f build >> $startdir/build-$pkgname.sh
+
+cat <<EOM >>$startdir/build-$pkgname.sh
+
+create_slackdesc() {
+mkdir \$startdir/pkg/install
+cat <<"EODESC" >\$startdir/pkg/install/slack-desc
+$pkgname: ${slackdesc[0]}
+$pkgname: 
+$pkgname: ${slackdesc[1]}
+$pkgname: ${slackdesc[2]}
+$pkgname: ${slackdesc[3]}
+$pkgname: ${slackdesc[4]}
+$pkgname: ${slackdesc[5]}
+$pkgname: ${slackdesc[6]}
+$pkgname: ${slackdesc[7]}
+$pkgname: ${slackdesc[8]}
+$pkgname: ${slackdesc[9]}
+EODESC
+}
+
+EOM
+
+if [[ "$dotnew" ]]; then
+    cat<<EOP >>$startdir/build-${pkgname}.sh
+setup_dotnew() {
+    for files in ${dotnew[@]} ; do
+        fullfile="\${startdir}/pkg/\${files}"
+        if [ -e "\$fullfile" ]; then
+            mv \$fullfile \${fullfile}.new
+        else
+            echo "\$fullfile was not found"
+            exit 2
+        fi
+    done
+    cat<<"EODOTNEW" >\$startdir/pkg/install/doinst.sh
+#Added by clxbuild $clxbuildver
+dotnew() {
+        NEW="\${1}.new"
+        OLD="\$1"
+        if [ ! -e \$OLD ]; then
+                mv \$NEW \$OLD
+        elif [ "\$(cat \$OLD | md5sum)" = "\$(cat \$NEW | md5sum)" ]; then
+                rm \$NEW
+        fi
+}
+EOP
+
+for i in ${dotnew[@]}; do
+echo "dotnew $i" >> $startdir/build-$pkgname.sh
+done
+cat <<"EOQ" >>$startdir/build-$pkgname.sh
+EODOTNEW
+}
+
+EOQ
+fi
+
+if [[ "$(grep '^doinst\(\)' $startdir/CLXBUILD)" ]]; then
+    echo 'setup_doinst() {' >> $startdir/build-$pkgname.sh
+    echo 'cat <<"EODOINST" >>$startdir/pkg/install/doinst.sh' \
+        >>$startdir/build-$pkgname.sh
+    declare -f doinst | \
+        sed "s/\$pkgname\|\${pkgname}/$pkgname/g" | \
+        sed "s/\$pkgver\|\${pkgver}/$pkgver/g" | \
+        sed "s/\$arch\|\${arch}\|\$ARCH\|\${ARCH}/$arch/g" | \
+        sed "s/\$LIBDIRSUFFIX\|\${LIBDIRSUFFIX}/$LIBDIRSUFFIX/g" \
+        >>$startdir/build-$pkgname.sh
+    echo 'doinst' >>$startdir/build-$pkgname.sh
+    echo 'EODOINST' >>$startdir/build-$pkgname.sh
+    echo -e '}\n' >>$startdir/build-$pkgname.sh
+fi
+
+if [[ "$docs" ]]; then
+cat <<EOEXTRADOCS >> $startdir/build-$pkgname.sh
+copy_docs() {
+    for stuff in \${docs[@]}; do
+        if [ ! -d "\$startdir/pkg/usr/doc/\$pkgname-\$pkgver" ]; then
+            mkdir -p \$startdir/pkg/usr/doc/\$pkgname-\$pkgver
+        fi
+        find \$startdir/src -type f -iname "\$stuff" -exec cp -LR '{}' \$startdir/pkg/usr/doc/\$pkgname-\$pkgver \;
+    done
+}
+EOEXTRADOCS
+fi
+
+cat <<SRCFILE>>$startdir/build-$pkgname.sh
+create_source_file(){
+    [ -f \$package.src ] && rm \$package.src
+    if [ ! -z \$sourcetemplate ]; then
+        echo \$sourcetemplate/CLXBUILD >> \$package.src
+        for SOURCES in \${source[@]}; do
+            protocol=\$(echo \$SOURCES | sed 's|:.*||')
+            if ! [ "\$protocol" = "http" -o "\$protocol" = "https" -o "\$protocol" = "ftp" ]; then
+                if [ ! -z \$sourcetemplate ]; then
+                    echo \$sourcetemplate/\$(basename \$SOURCES) >> \$package.src
+                else
+                    echo \$(basename \$SOURCES) >> \$package.src
+                fi
+            else
+                echo \$SOURCES >> \$package.src
+            fi
+        done
+    fi
+}
+SRCFILE
+
+cat <<POSTCHECKS>>$startdir/build-$pkgname.sh
+post_checks(){
+    # Ideas taken from src2pkg :)
+    if [ -d "\$startdir/pkg/usr/doc/\$pkgname-\$pkgver" ]; then
+        for DIRS in usr/doc/\$pkgname-\$pkgver usr/doc; do
+            cd \$startdir/pkg/\$DIRS
+            if [[ \$(find . -type f) = "" ]] ; then
+                cd ..
+                rmdir \$DIRS
+            fi
+        done
+    fi
+    # if the docs weren't deleted ...
+    if [ -d "\$startdir/pkg/usr/doc/\$pkgname-\$pkgver" ]; then
+        cd \$startdir/pkg/usr/doc/\$pkgname-\$pkgver
+        #remove zero length files
+        if [[ \$(find . -type f -size 0) ]]; then
+            echo "Removing some zero lenght files"
+            find . -type f -size 0 -exec rm -f {} \;
+        fi
+    fi
+    # check if we need to add code to handle info pages
+    if [[ -d \$startdir/pkg/usr/info ]] && [[ ! \$(grep install-info \$startdir/pkg/install/doinst.sh &> /dev/null) ]] ; then
+        echo "Found info files - Adding install-info command to doinst.sh"
+        INFO_LIST=\$(ls -1 \$startdir/pkg/usr/info)
+        echo "" >> \$startdir/pkg/install/doinst.sh
+        echo "if [ -x usr/bin/install-info ] ; then" >> \$startdir/pkg/install/doinst.sh
+        for page in \$(echo \$INFO_LIST) ; do
+            echo " usr/bin/install-info --info-dir=usr/info usr/info/\$page 2>/dev/null" >> \$startdir/pkg/install/doinst.sh
+        done
+        echo "fi" >> \$startdir/pkg/install/doinst.sh
+    fi
+    [[ -e \$startdir/pkg/usr/info/dir ]] && rm -f \$startdir/pkg/usr/info/dir
+
+POSTCHECKS
+
+# add files in etc to dotnew (if it wasn't defined)
+if [[ -z $NOAUTODOTNEW ]] && [[ -z $dotnew ]]; then
+cat <<NOAUTODOTNEW>>$startdir/build-$pkgname.sh        
+    if [ -d \$startdir/pkg/etc ]; then
+        cd \$startdir/pkg/
+        for conf in \$(find ./etc -type f) ; do
+            conf=\${conf: 2}
+            dotnew=( "\${dotnew[@]}" "\$conf" )
+        done
+    fi
+    if [[ "\$dotnew" ]]; then
+        for files in \${dotnew[@]} ; do
+                fullfile="\${startdir}/pkg/\${files}"
+                if [ -e "\$fullfile" ]; then
+                        mv \$fullfile \${fullfile}.new
+                else
+                        echo "\$fullfile was not found"
+                        exit 2
+                fi
+        done
+        cat<<"EODOTNEW" >>\$startdir/pkg/install/doinst.sh
+#Added by clxbuild $clxbuildver
+dotnew() {
+        NEW="\${1}.new"
+        OLD="\$1"
+        if [ ! -e \$OLD ]; then
+                mv \$NEW \$OLD
+        elif [ "\$(cat \$OLD | md5sum)" = "\$(cat \$NEW | md5sum)" ]; then
+                rm \$NEW
+        fi
+}
+EODOTNEW
+for i in \${dotnew[@]}; do
+echo "dotnew \$i" >> \$startdir/pkg/install/doinst.sh
+done
+fi
+NOAUTODOTNEW
+fi
+cat <<ENDPOSTCHECK >>$startdir/build-$pkgname.sh
+}
+
+####End Non Redundant Code############################
+ENDPOSTCHECK
+
+
+cat <<"EOEXECUTION1" >> $startdir/build-$pkgname.sh
+#Execution
+
+check_for_root
+clean_old_builds
+prepare_directory
+EOEXECUTION1
+[ -z "$NOEXTRACT" ] && echo "extract_source" >>$startdir/build-$pkgname.sh
+cat <<"EOEXECUTION2">>$startdir/build-$pkgname.sh
+set_pre_permissions
+build
+if [ ! "$?" = "0" ]; then
+    echo "build() failed."
+    exit 2
+fi
+create_slackdesc
+post_checks
+EOEXECUTION2
+
+[[ "$dotnew" ]] && echo "setup_dotnew" >>$startdir/build-$pkgname.sh
+[[ "$(grep '^doinst\(\)' $startdir/CLXBUILD)" ]] && echo "setup_doinst" >>$startdir/build-$pkgname.sh
+[[ "$docs" ]] && echo "copy_docs" >>$startdir/build-$pkgname.sh
+[[ $KEEPLA -ne 1 ]] && echo "remove_libtool_archives" >> \
+   $startdir/build-$pkgname.sh
+
+[ -z "$NOSTRIP" ] && echo "strip_binaries" >>$startdir/build-$pkgname.sh
+cat <<"EOEXECUTION32" >> $startdir/build-$pkgname.sh
+gzip_man_and_info_pages
+set_post_permissions
+copy_build_script
+create_package
+create_source_file
+EOEXECUTION32
+cat <<"EOEXECUTION31" >> $startdir/build-$pkgname.sh
+echo "Package has been built."
+EOEXECUTION31
+if [ "$REMOVEDIRS" == "1" ]; then
+    echo 'echo "Cleaning pkg and src directories"' >> $startdir/build-$pkgname.sh
+    echo "clean_dirs" >> $startdir/build-$pkgname.sh
+fi
+
+chmod +x $startdir/build-$pkgname.sh
+echo "build-$pkgname.sh has been created"
+if [ "$EXECUTE" == "1" ]; then
+    ./build-$pkgname.sh 2>&1 | tee build-$pkgname-$pkgver-$arch-$pkgrel.log
+    retval=${PIPESTATUS[0]}
+    if [ "$REMOVEDIRS" == "1" ];then
+        rm ./build-$pkgname.sh
+    fi
+fi
+
+exit $retval
+
