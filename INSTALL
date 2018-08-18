@@ -1,4 +1,4 @@
-slkbuild: arch-like wrapper script for easy packaging
+clxbuild: arch-like wrapper script for easy packaging on Cucumber Linux
 
 This distribution will run on most UNIX systems.
 Its currently developed under Linux.
@@ -6,16 +6,16 @@ Its currently developed under Linux.
 Installing
 ---------
 
-The preferred method for installing slkbuild is to use the Makefile script
+The preferred method for installing clxbuild is to use the Makefile script
 compatible with most UNIX systems that contain the "make" command.
 
-To install slkbuild on these platforms run the following commands:
+To install clxbuild on these platforms run the following commands:
 
     make
     make install
 
 There are several optional parameters that you may pass to the Makefile
-script to customize slkbuild for your applications. These include:
+script to customize clxbuild for your applications. These include:
 
 * DESTDIR: The default destination directory (default: /)
 * PREFIX: The default prefix (default: /usr/local)

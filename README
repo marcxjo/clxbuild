@@ -1,10 +1,10 @@
-slkbuild: arch-like wrapper script for easy slackware packaging
+clxbuild: arch-like wrapper script for easy packaging on cucumber linux
 
-This is a utility to build packages for Slackware and derivatives
+This is a utility to build packages for Cucumber Linux and derivatives
 through the use of makepkg.
 
 Please note root access is required. Use of fakeroot for running
-slkbuild is advised. Read the man pages slkbuild(8) and SLKBUILD(5)
+clxbuild is advised. Read the man pages clxbuild(8) and CLXBUILD(5)
 for more details on this tool.
 
  BE CAREFUL when adjusting build files as they could potentially harm your

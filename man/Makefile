@@ -1,10 +1,10 @@
 
 .PHONY: man
 man:
-	txt2tags -o slkbuild.8 slkbuild.t2t
-	txt2tags -o SLKBUILD.5 SLKBUILD.t2t
+	txt2tags -o clxbuild.8 clxbuild.t2t
+	txt2tags -o CLXBUILD.5 CLXBUILD.t2t
 
 .PHONY: clean
 clean:
-	rm -f slkbuild.8
-	rm -f SLKBUILD.5
+	rm -f clxbuild.8
+	rm -f CLXBUILD.5
